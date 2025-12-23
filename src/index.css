@@ -1,0 +1,69 @@
+/* 1. Imports */
+@import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+@import "tailwindcss";
+
+/* 2. Theme Configuration */
+@theme {
+  --font-mono: "VT323", monospace;
+
+  /* NEW COLOR: Satin Sheen Gold #C6A540 */
+  --color-terminal-bg: #050505;       /* Keep black bg for contrast */
+  --color-terminal-main: #C6A540;     /* The main gold text */
+  --color-terminal-dim: #4a3d12;      /* A darkened version for borders/dim text */
+  --color-terminal-glow: rgba(198, 165, 64, 0.5); /* Gold glow */
+
+  /* Animations */
+  --animate-blink: blink 1s step-end infinite;
+  
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+}
+
+/* 3. Base Styles */
+@layer base {
+  /* Global scaling to reduce size by ~30% */
+  html {
+    font-size: 70%; /* Defaults is 100% (16px). 70% scales everything down. */
+  }
+
+  body {
+    @apply bg-terminal-bg text-terminal-main font-mono antialiased overflow-hidden;
+    
+    /* The Grid Background - Updated to Gold RGB (198, 165, 64) */
+    background-image: 
+        linear-gradient(rgba(198, 165, 64, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(198, 165, 64, 0.05) 1px, transparent 1px);
+    background-size: 20px 20px;
+    
+    /* The Glow Effect - Updated to Gold */
+    text-shadow: 0 0 5px var(--color-terminal-glow);
+  }
+}
+
+/* 4. Utilities */
+
+/* Define the main utility class */
+@utility scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Target the pseudo-element */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Scanline effect */
+.scanline {
+  background: linear-gradient(
+    to bottom,
+    rgba(255,255,255,0),
+    rgba(255,255,255,0) 50%,
+    rgba(0,0,0,0.2) 50%,
+    rgba(0,0,0,0.2)
+  );
+  background-size: 100% 4px;
+  pointer-events: none;
+}
