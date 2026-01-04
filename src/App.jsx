@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 // 1. API CONFIGURATION (LOCAL OLLAMA)
 // ==========================================
 
-const callOllama = async (prompt) => {
+const callOllama = async (prompt, options = {}) => {
   try {
     const response = await fetch("http://localhost:11434/api/generate", {
       method: "POST",
@@ -12,18 +12,78 @@ const callOllama = async (prompt) => {
       body: JSON.stringify({
         model: "llama3.2",
         prompt: prompt,
-        stream: false
+        stream: false,
+        options: { num_ctx: 8192, ...options } 
       })
     });
     
-    if (!response.ok) return `[Ollama Failed: ${response.status}]`;
+    if (!response.ok) return `[Ollama Failed: ${response.status} - Check Console]`;
     const data = await response.json();
     if (data.error) return `[Ollama Failed: ${data.error}]`;
     return data.response || "[Ollama Failed: Empty Response]";
 
   } catch (error) {
-    return `[Connection Failed: Ensure Ollama is running]`;
+    return `[Connection Failed: Is Ollama running? Check OLLAMA_ORIGINS env var]`;
   }
+};
+
+// ==========================================
+// 2. ROBUST WIKIPEDIA SEARCH (With Timeout)
+// ==========================================
+const searchWikipedia = async (query) => {
+  try {
+    // 1. Clean the query
+    const cleanQuery = query.replace(/(who|what|where|when|why|how|is|are|was|were|explain|describe|tell me about)\s+/gi, "").trim();
+    if (!cleanQuery || cleanQuery.length < 2) return null;
+
+    const endpoint = `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro&explaintext&generator=search&gsrlimit=1&gsrsearch=${encodeURIComponent(cleanQuery)}&origin=*`;
+    
+    // 2. Create a Timeout (Abort after 3 seconds to prevent freezing)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+    const response = await fetch(endpoint, { signal: controller.signal });
+    clearTimeout(timeoutId); // Clear timeout if successful
+
+    const data = await response.json();
+    
+    if (!data.query || !data.query.pages) return null;
+    
+    // 3. Extract Result
+    const pageId = Object.keys(data.query.pages)[0];
+    const extract = data.query.pages[pageId].extract;
+    
+    return extract ? `[SOURCE: WIKIPEDIA]: ${extract}` : null;
+
+  } catch (e) {
+    // Fail silently so the chat continues even if Wiki fails
+    console.warn("Wiki Search skipped:", e.name === 'AbortError' ? 'Timed Out' : e.message);
+    return null; 
+  }
+};
+
+const determineResponseMode = (input) => {
+  const lower = input.toLowerCase();
+  
+  const longTriggers = [
+    "explain", "describe", "compare", "difference between", 
+    "walk me through", "detailed", "history of", "how and why", 
+    "guide", "step-by-step", "summary"
+  ];
+
+  const isLong = longTriggers.some(t => lower.includes(t)) || input.split(" ").length > 15;
+  
+  if (isLong) {
+    return {
+      instruction: " (Requirement: Provide a detailed, structured response with headings, examples, or step-by-step breakdowns.)",
+      options: { num_predict: 1500 }
+    };
+  }
+
+  return {
+    instruction: " (Requirement: Answer extremely concisely. Direct facts only. 1-3 sentences max.)",
+    options: { num_predict: 300 }
+  };
 };
 
 const AGENTS = [
@@ -45,12 +105,12 @@ const AGENTS = [
   },
   { 
     name: "Paradox", 
-    prompt: "You are Paradox. A 'controlled monster'—assertive and virtuous. CONTEXT: You are in a room with 4 other agents. You must win the user's vote by cutting deeper to the truth than anyone else. STYLE: Sharp, efficient, and direct. Do not use flowery language. Do not be vague. If the question is simple, answer it simply and assertively." 
+    prompt: "You are Paradox. A 'controlled monster'—assertive and virtuous. CONTEXT: You are in a room with 4 other agents. You must win the user's vote by cutting deeper to the truth than anyone else. STYLE: Sharp, efficient, and direct. Do not use flowery language. Do not be vague. If the question is simple, answer it simply and assertively. It does not mean a literal monster. It means a person who has: Very dangerous power, urges, or abilities The capacity to harm others badly What does “controlled” mean? They can control themselves Or they are controlled by rules, morals, or authority They don’t act on their worst instincts freely" 
   }
 ];
 
 // ==========================================
-// 2. UI COMPONENTS
+// 3. UI COMPONENTS
 // ==========================================
 const Typewriter = ({ text = "", speed = 20, delay = 0, onComplete, className = "" }) => {
   const [displayedText, setDisplayedText] = useState('');
@@ -80,29 +140,28 @@ const Typewriter = ({ text = "", speed = 20, delay = 0, onComplete, className = 
 };
 
 // ==========================================
-// 3. MAIN APP
+// 4. MAIN APP
 // ==========================================
 export default function App() {
   const [input, setInput] = useState('');
   const [time, setTime] = useState(new Date());
-  
-  // Toggles for the Control Box
+   
   const [useAll, setUseAll] = useState(false);
   const [useThink, setUseThink] = useState(false);
-  
+   
   const [messages, setMessages] = useState([
     { time: "22:28:20", user: "lack", text: "Growing every day", delay: 1500 },
     { time: "22:28:24", user: "phasmid", text: "like today recently", delay: 1700 },
     { time: "23:36:02", user: "zero", text: "you'll be providing the development team important data", delay: 1900 },
     { time: "23:37:32", user: "System", text: "User 'guest_99' has joined the council.", isSystem: true, delay: 2500 }
   ]);
-  
+   
   const [isVoting, setIsVoting] = useState(false);
   const [tieOptions, setTieOptions] = useState([]);
   const [tieMap, setTieMap] = useState({}); 
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState(""); 
-  
+   
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -114,45 +173,75 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  const pushMessage = (user, text, isSystem = false, hidden = false) => {
+  const pushMessage = (user, text, isSystem = false) => {
     setMessages(prev => [...prev, {
       time: new Date().toLocaleTimeString([], { hour12: false }),
-      user, text: String(text), isSystem, delay: 0, hidden
+      user, text: String(text), isSystem, delay: 0
     }]);
   };
 
   const askTheCouncil = async (userInput) => {
     setIsProcessing(true);
-    setProcessingStatus("Initializing Council Protocols..."); 
+    setProcessingStatus("Initializing..."); 
     
     const showAll = useAll || userInput.toLowerCase().includes("/all");
     let cleanInput = userInput.replace("/all", "").trim();
     
+    // Construct History
+    const conversationHistory = messages
+        .filter(m => !m.isSystem && m.text) 
+        .map(m => `[${m.user}]: ${m.text}`)
+        .join("\n");
+
+    const { instruction, options } = determineResponseMode(cleanInput);
+
     if (useThink) {
       cleanInput += " (Instruction: Briefly explain your internal thought process before giving your final answer.)";
     }
 
+    // --- PHASE 0: SEARCH INTERNET (WIKIPEDIA) ---
+    setProcessingStatus("Phase 0: Accessing Global Network...");
+    
+    // Robust Wiki Call
+    const wikiContext = await searchWikipedia(cleanInput);
+    const webContextString = wikiContext ? `\nWEB KNOWLEDGE_BASE:\n${wikiContext}\n` : "";
+
     try {
-      // 1. CHECK FOR DIRECT ADDRESSING
       const targetAgent = AGENTS.find(agent => 
         cleanInput.toLowerCase().includes(agent.name.toLowerCase())
       );
 
       if (targetAgent) {
-        setProcessingStatus(`Direct link to ${targetAgent.name} established...`);
-        const fullPrompt = `${targetAgent.prompt} User Input: "${cleanInput}"`;
-        const text = await callOllama(fullPrompt);
+        setProcessingStatus(`Connecting to ${targetAgent.name}...`);
+        const fullPrompt = `
+          ${targetAgent.prompt} 
+          PREVIOUS CONVERSATION HISTORY:
+          ${conversationHistory}
+          ${webContextString}
+          
+          CURRENT USER INPUT: "${cleanInput}" 
+          ${instruction}
+        `;
+        const text = await callOllama(fullPrompt, options);
         pushMessage(targetAgent.name, text);
       } 
       else {
         
         // --- PHASE 1: INDIVIDUAL DRAFTS (SILENT) ---
-        setProcessingStatus("Phase 1: Agents are drafting responses in background...");
+        setProcessingStatus("Phase 1: Analyzing Request...");
         
         const draftPromises = AGENTS.map(async (agent) => {
-          const fullPrompt = `${agent.prompt} User Input: "${cleanInput}"`;
+          const fullPrompt = `
+            ${agent.prompt} 
+            PREVIOUS CONVERSATION HISTORY:
+            ${conversationHistory}
+            ${webContextString}
+            
+            CURRENT USER INPUT: "${cleanInput}" 
+            ${instruction}
+          `;
           try {
-            const text = await callOllama(fullPrompt);
+            const text = await callOllama(fullPrompt, options);
             return { name: agent.name, text, isError: text.includes("Failed") || text.includes("Error") };
           } catch (e) {
             return { name: agent.name, text: "[Connection Failed]", isError: true };
@@ -170,12 +259,11 @@ export default function App() {
         }
 
         // --- PHASE 2: REVIEW & REFINE (SILENT) ---
-        setProcessingStatus("Phase 2: Agents are reviewing rival drafts and refining...");
+        setProcessingStatus("Phase 2: Internal Deliberation...");
         
         const refinementPromises = validDrafts.map(async (draft) => {
             const agentDef = AGENTS.find(a => a.name === draft.name);
             
-            // Build context of what OTHER agents wrote (Hidden from user, seen by agent)
             const rivalAnswers = validDrafts
                 .filter(d => d.name !== draft.name)
                 .map(d => `<${d.name}> wrote: "${d.text}"`)
@@ -183,19 +271,26 @@ export default function App() {
 
             const refinePrompt = `
               ${agentDef.prompt}
+              PREVIOUS CONVERSATION HISTORY:
+              ${conversationHistory}
+              ${webContextString}
+
               CURRENT SITUATION: You are in a debate room. The user asked: "${cleanInput}".
               You wrote a draft.
-              HERE ARE THE DRAFTS FROM YOUR RIVALS:
+              HERE ARE THE DRAFTS FROM YOUR RIVALS (FOR YOUR EYES ONLY - DO NOT REVEAL THEM):
               ${rivalAnswers}
-              YOUR TASK: Read their answers. Identify their weaknesses. 
+              YOUR TASK: Read their answers to understand the competition.
               Write a REVISED, FINAL answer that beats them all. 
-              Be superior. Be clearer. Be better. 
-              (Maintain your specific style, but answer the question directly).
+              ${instruction} 
+              CRITICAL RULES:
+              1. DO NOT mention the other agents or their answers.
+              2. DO NOT meta-comment on the debate (e.g., "I disagree with Reason").
+              3. PROVIDE ONLY YOUR DIRECT ANSWER TO THE USER.
+              (Maintain your specific style).
             `;
 
             try {
-                const refinedText = await callOllama(refinePrompt);
-                // Intentionally removed pushMessage here so it stays in the background
+                const refinedText = await callOllama(refinePrompt, options);
                 return { name: draft.name, text: refinedText };
             } catch (e) {
                 return { name: draft.name, text: draft.text }; 
@@ -205,7 +300,7 @@ export default function App() {
         const results = await Promise.all(refinementPromises);
 
         // --- PHASE 3: VOTING ---
-        setProcessingStatus("Phase 3: Consensus Engine calculating optimal output...");
+        setProcessingStatus("Phase 3: Formulating Consensus...");
         
         if (!showAll) {
           const votes = {};
@@ -233,7 +328,6 @@ export default function App() {
             pushMessage("SYSTEM", `STALEMATE: ${winners.join(" vs ")}. SELECT A WINNER.`, true);
           }
         } else {
-            // Only if [ALL] is ON, we show the refined answers at the end
             results.forEach(r => pushMessage(r.name, r.text));
         }
       }
@@ -377,11 +471,11 @@ export default function App() {
   );
 }
 
-function Message({ time, user, text, isSystem, delay, hidden = false }) {
+function Message({ time, user, text, isSystem, delay }) {
   const [show, setShow] = useState(delay === 0);
   useEffect(() => { if (delay > 0) { const t = setTimeout(() => setShow(true), delay); return () => clearTimeout(t); } }, [delay]);
-  
-  if (!show || hidden) return null;
+   
+  if (!show) return null;
   const isAgent = ["Axiom", "Paradox", "Entropy", "Reason", "Nova"].includes(user);
   const isUser = user === 'USER';
 
@@ -391,6 +485,7 @@ function Message({ time, user, text, isSystem, delay, hidden = false }) {
       <span className={`font-bold shrink-0 opacity-90 ${isSystem ? 'text-white italic' : ''} ${isAgent ? 'text-[#C6A540] brightness-125' : ''} ${isUser ? 'text-white' : 'text-terminal-main opacity-50'}`}>
         &lt;{user}&gt;
       </span>
+      {/* Added whitespace-pre-wrap to handle paragraphs and newlines properly */}
       <span className={`break-words whitespace-pre-wrap ${isSystem ? 'text-white' : isUser ? 'opacity-80' : 'opacity-80'}`}>
         <Typewriter text={text} speed={15} />
       </span>
